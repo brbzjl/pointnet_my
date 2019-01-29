@@ -62,6 +62,9 @@ def combine_label_data(path_label,path_xyz,output_folder):
             data_xyz.append(np.load(name))
         label = np.load(labelfilename)
         label_majority = np.argmax(label, axis=-1)
+        idxlabel = np.where(np.max(label, axis=-1) == 0)
+        label_majority[idxlabel] = -1
+        
         data_label = np.dstack((data_xyz[0], data_xyz[1], data_xyz[2]))
         data_label = np.reshape(data_label, (-1, 3))
         idx = np.where(np.max(data_label[:, 0:3], axis=-1) != 0)
