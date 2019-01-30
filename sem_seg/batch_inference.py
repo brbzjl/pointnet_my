@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+import importlib
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(BASE_DIR)
 sys.path.append(ROOT_DIR)
@@ -8,12 +9,14 @@ sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 data_dir = os.path.join(ROOT_DIR, 'data')
 indoor3d_data_dir = os.path.join(data_dir, 'IKG')
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
-from models import pointnet_seg
+sys.path.append(os.path.join(ROOT_DIR, 'eval/evaluate_city'))
+pointnet_seg = importlib.import_module('pointnet_seg')
+Eval = importlib.import_module('iou')
 import indoor3d_util
-import gen_indoor3d_h5_my
 import provider
 import numpy as np
 import tensorflow as tf
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--gpu', type=int, default=0, help='GPU to use [default: GPU 0]')
 parser.add_argument('--batch_size', type=int, default=1, help='Batch Size during training [default: 1]')
@@ -32,14 +35,11 @@ MODEL_PATH = os.path.join(BASE_DIR, 'log/model6.ckpt')
 GPU_INDEX = FLAGS.gpu
 DUMP_DIR = os.path.join(BASE_DIR, 'log/')
 if not os.path.exists(DUMP_DIR): os.mkdir(DUMP_DIR)
-#LOG_FOUT = open(os.path.join(DUMP_DIR, 'log_evaluate.txt'), 'w')
-#LOG_FOUT.write(str(FLAGS)+'\n')
-#ROOM_PATH_LIST = [os.path.join(ROOT_DIR,line.rstrip()) for line in open(FLAGS.room_data_filelist)]
 
 NUM_CLASSES = 20
-ALL_FILES = provider.getDataFiles('IKG_indoor3d_sem_seg_hdf5_data1/all_files.txt')
-#room_filelist = [line.rstrip() for line in open('IKG_indoor3d_sem_seg_hdf5_data1/room_filelist.txt')]
 
+data_folder = '/media/rubing/hdd/data_label/IKG_hdf5_test'
+ALL_FILES = provider.getDataFiles(os.path.join(data_folder, 'all_files.txt'))
 def log_string(out_str):
     LOG_FOUT.write(out_str+'\n')
     LOG_FOUT.flush()
@@ -80,26 +80,24 @@ def evaluate():
     
     total_correct = 0
     total_seen = 0
-    #fout_out_filelist = open(FLAGS.output_filelist, 'w')
+    label_pre_all = []
+    label_gt_all = []
     for room_path in ALL_FILES:
-        '''
-        out_data_label_filename = os.path.basename(room_path)[:-4] + '_pred.txt'
-        out_data_label_filename = os.path.join(DUMP_DIR, out_data_label_filename)
-        out_gt_label_filename = os.path.basename(room_path)[:-4] + '_gt.txt'
-        out_gt_label_filename = os.path.join(DUMP_DIR, out_gt_label_filename)
-        print(room_path, out_data_label_filename)
-        '''
-        #a, b = eval_one_epoch(sess, ops, room_path, out_data_label_filename, out_gt_label_filename)
-        a, b = eval_one_epoch(sess, ops, room_path)
-        total_correct += a
-        total_seen += b
-        #fout_out_filelist.write(out_data_label_filename+'\n')
-        #fout_out_filelist.close()
-        print('all room eval accuracy: %f'% (total_correct / float(total_seen)))
 
-#def eval_one_epoch(sess, ops, room_path, out_data_label_filename, out_gt_label_filename):
+        gt, pre = eval_one_epoch(sess, ops, room_path)
+        label_pre_all.append(pre)
+        label_gt_all.append(gt)
+        #print('all room eval accuracy: %f'% (total_correct / float(total_seen)))
+        #break
+    label_pre_all = np.concatenate(label_pre_all, 0)
+    label_gt_all = np.concatenate(label_pre_all, 0)
+    dict = Eval.get_iou(pred=np.asarray(np.argmax(label_pre_all, axis=-1).reshape((1, -1, 1)), dtype=np.uint8),
+                        gt=np.asarray(np.argmax(label_gt_all, axis=-1).reshape((1, -1, 1)), dtype=np.uint8))
+    print (dict['classScores'])
+    print (dict['averageScoreClasses'])
+
 def eval_one_epoch(sess, ops, room_path):
-    error_cnt = 0
+
     is_training = False
     total_correct = 0
     total_seen = 0
@@ -107,22 +105,20 @@ def eval_one_epoch(sess, ops, room_path):
     total_seen_class = [0 for _ in range(NUM_CLASSES)]
     total_correct_class = [0 for _ in range(NUM_CLASSES)]
     if FLAGS.visu:
-        fout = open(os.path.join(DUMP_DIR, os.path.basename(room_path)[:-3]+'_pred6o.txt'), 'w')
-        fout_gt = open(os.path.join(DUMP_DIR, os.path.basename(room_path)[:-3]+'_gt6o.txt'), 'w')
-    #fout_data_label = open(out_data_label_filename, 'w')
-    #fout_gt_label = open(out_gt_label_filename, 'w')
-    
-    #current_data, current_label = gen_indoor3d_h5_my.room2blocks_wrapper_normalized(room_path, NUM_POINT)
+        fout = open(os.path.join(DUMP_DIR, os.path.basename(room_path)[:-3]+'_predtest.txt'), 'w')
+        fout_gt = open(os.path.join(DUMP_DIR, os.path.basename(room_path)[:-3]+'_gttest.txt'), 'w')
     current_data, current_label = provider.loadDataFile(room_path)
     current_data = current_data[:,0:NUM_POINT,:]
     current_label = np.squeeze(current_label)
+    idx = np.where(current_label == 255)
+    current_label[idx] = 19
     # Get room dimension..
 
-    file_size = current_data.shape[0]
-    num_batches = file_size // BATCH_SIZE
-    print(file_size)
+    data_size = current_data.shape[0]
+    num_batches = data_size // BATCH_SIZE
+    print(data_size)
 
-    
+    label_pre_list = []
     for batch_idx in range(num_batches):
         start_idx = batch_idx * BATCH_SIZE
         end_idx = (batch_idx+1) * BATCH_SIZE
@@ -139,6 +135,7 @@ def eval_one_epoch(sess, ops, room_path):
         #else:
         pred_label = np.argmax(pred_val, 2) # BxN
 
+        label_pre_list.append(pred_label)
 
         # Save prediction labels to OBJ file
         for b in range(BATCH_SIZE):
@@ -157,8 +154,7 @@ def eval_one_epoch(sess, ops, room_path):
                 if FLAGS.visu:
                     fout.write('v %f %f %f %d %d %d\n' % (pts[i,3], pts[i,4], pts[i,5], color[0], color[1], color[2]))
                     fout_gt.write('v %f %f %f %d %d %d\n' % (pts[i,3], pts[i,4], pts[i,5], color_gt[0], color_gt[1], color_gt[2]))
-                #fout_data_label.write('%f %f %f %d %d %d %f %d\n' % (pts[i,6], pts[i,7], pts[i,8], pts[i,3], pts[i,4], pts[i,5], pred_val[b,i,pred[i]], pred[i]))
-                #fout_gt_label.write('%d\n' % (l[i]))
+
         correct = np.sum(pred_label == current_label[start_idx:end_idx,:])
         total_correct += correct
         total_seen += (cur_batch_size*NUM_POINT)
@@ -175,7 +171,7 @@ def eval_one_epoch(sess, ops, room_path):
     if FLAGS.visu:
         fout.close()
         fout_gt.close()
-    return total_correct, total_seen
+    return current_label, label_pre_list
 
 
 if __name__=='__main__':
