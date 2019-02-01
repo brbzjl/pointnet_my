@@ -4,7 +4,8 @@ import fnmatch
 import os
 import sys
 import time
-import pptk
+#import pptk
+SHOW_DATA = False
 NUM_POINT = 4096
 SCANER_INDEX = '1'
 # --------------------------------------
@@ -28,15 +29,20 @@ sys.path.append(BASE_DIR)
 sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 import data_prep_util
 sys.path.append(os.path.join(ROOT_DIR, 'data'))
-output_folder = os.path.join(ROOT_DIR, 'data/IKG_hdf5')
+# --------------------------------------
+# ----- data direction  -----
+# --------------------------------------
+output_folder = '/media/rubing/hdd/data_label/IKG_hdf5_test'
 if not os.path.exists(output_folder):
     os.mkdir(output_folder)
-#label = np.load("/media/rubing/hdd/labels/20170331/label/170331_083409_Scanner_1_labelhist.npy")
-#idx = np.where(np.max(label,axis=-1)!=0)
-#path_label = '/media/rubing/hdd/labels/20170331/label/'
-#path_xyz = '/media/rubing/hdd/strips/20170331/xyz/'
-path_label = os.path.join(ROOT_DIR, 'hdd/labels/20170331/label/')
-path_xyz =os.path.join(ROOT_DIR, 'hdd/strips/20170331/xyz/')
+path_label = '/media/rubing/hdd/labels/20170405/label/' #20170405 for test ,20170331 for train
+path_xyz = '/media/rubing/hdd/strips/20170405/xyz/'
+output_all_filelist_dir = os.path.join(output_folder, 'all_files.txt')
+#path_label = os.path.join(ROOT_DIR, 'hdd/labels/20170331/label/')
+#path_xyz =os.path.join(ROOT_DIR, 'hdd/strips/20170331/xyz/')
+
+# --------------------------------------
+fout_all_files = open(output_all_filelist_dir, 'w')
 output_filename_prefix = os.path.join(output_folder, ''.join([SCANER_INDEX,'_ply_data_all']))
 
 def combine_label_data(path_label,path_xyz,output_folder):
@@ -58,32 +64,50 @@ def combine_label_data(path_label,path_xyz,output_folder):
 
         file_xyz = [path_xyz + xname_, path_xyz + yname_,path_xyz + zname_]
         data_xyz = []
-        for name in file_xyz:
-            data_xyz.append(np.load(name))
+        for i, name in enumerate(file_xyz):
+            try:
+                data_xyz.append(np.load(name))
+            except IOError:
+                print('no related xyz data' + namepre_)
+
+        if not data_xyz:
+            continue
+
         label = np.load(labelfilename)
         label_majority = np.argmax(label, axis=-1)
         idxlabel = np.where(np.max(label, axis=-1) == 0)
         label_majority[idxlabel] = -1
         
         data_label = np.dstack((data_xyz[0], data_xyz[1], data_xyz[2]))
+        # z_road is the z mean value of the road
+        road_idx = np.where(label_majority == 0)
+        z_road = np.mean(data_label[road_idx][:,2])
+
         data_label = np.reshape(data_label, (-1, 3))
         idx = np.where(np.max(data_label[:, 0:3], axis=-1) != 0)
-        xyz_min  = np.amin(data_label[idx], axis=0)
-        data_label[:, 0:3] -= xyz_min
-        data_label = np.reshape(data_label, (3000,-1,3))
-        data_label = np.dstack((data_label,label_majority))
-        data, label = room2blocks_plus_normalized(data_label, NUM_POINT, block_size=10, stride=5)
+        # minmun value of xyz
+        xy_min = np.amin(data_label[idx], axis=0)[0:2]
 
-        v = pptk.viewer(data[1:10,:, 0:3])
-        print('{0}, {1}'.format(data.shape, label.shape))
-        sample_cnt += data.shape[0]
-        insert_batch(data, label, i == len(labelfiles) - 1)
+        data_label[:, 0:2] -= xy_min[0:2]#take care of this z value
+        data_label[:, 2] -= z_road
+        data_label = np.reshape(data_label, (3000,-1,3))
+
+        try:
+            data_label = np.dstack((data_label,label_majority))
+            data, label = room2blocks_plus_normalized(data_label, NUM_POINT, block_size=10, stride=5)
+
+            #v = pptk.viewer(data[1:10,:, 0:3])
+            print('{0}, {1}'.format(data.shape, label.shape))
+            sample_cnt += data.shape[0]
+            insert_batch(data, label, i == len(labelfiles) - 1)
+        except ValueError:
+            print('the dim in some aixs is different')
 
     print("Total samples: {0}".format(sample_cnt))
     fout_room = open(os.path.join(output_folder, 'room_filelist.txt'), 'w')
     fout_room.write(str(sample_cnt))
     fout_room.close()
-
+    fout_all_files.close()
 def room2blocks_plus_normalized(data_label, num_point, block_size, stride):
     """ room2block, with input filename and RGB preprocessing.
         for each block centralize XYZ, add normalized XYZ as 678 channels
@@ -131,8 +155,12 @@ def room2blocks(data_label, num_point, block_size, stride):
     for i in range(num_block):
         block_temp = data_label[:, i*stride:(i*stride + block_size),:]
         block_temp = np.reshape(block_temp, (-1, 4))
-        idx = np.where(np.max(block_temp[:, 0:3], axis=-1) >= 0)
+        idx = np.where(np.min(block_temp[:, 0:3], axis=-1) >= -0.2)
         block_temp = block_temp[idx]
+        #remove the data which its label value is -1
+        idx_minuslabel = np.where(block_temp[:, -1] != -1)
+        block_temp = block_temp[idx_minuslabel]
+
         #xyz_min = np.amin(block_temp, axis=0)[0:3]
         #xyz_min[0:2] -= [block_size / 2,block_size / 2]
         #block_data = block_temp[:,0:3]-xyz_min
@@ -186,6 +214,16 @@ def insert_batch(data, label, last_batch=False):
         h5_filename =  output_filename_prefix + '_' + str(h5_index) + '.h5'
         data_prep_util.save_h5(h5_filename, h5_batch_data, h5_batch_label, data_dtype, label_dtype)
         print('Stored {0} with size {1}'.format(h5_filename, h5_batch_data.shape[0]))
+        fout_all_files.write(h5_filename + '\n')
+        #-------------store the data to show -----------------
+        if SHOW_DATA:
+            fout = open(output_filename_prefix + '_' + str(h5_index) + '.txt', 'w')
+            for batch in range(h5_batch_data.shape[0]):
+                for p in range(h5_batch_data.shape[1]):
+                    fout.write('v %f %f %f \n' % (h5_batch_data[batch, p, 0], h5_batch_data[batch, p, 1],
+                                                  h5_batch_data[batch, p, 2]))
+            fout.close()
+        #--------------------------------------------------
         h5_index += 1
         buffer_size = 0
         # recursive call
@@ -194,6 +232,16 @@ def insert_batch(data, label, last_batch=False):
         h5_filename =  output_filename_prefix + '_' + str(h5_index) + '.h5'
         data_prep_util.save_h5(h5_filename, h5_batch_data[0:buffer_size, ...], h5_batch_label[0:buffer_size, ...], data_dtype, label_dtype)
         print('Stored {0} with size {1}'.format(h5_filename, buffer_size))
+        fout_all_files.write(h5_filename + '\n')
+        # -------------store the data to show -----------------
+        if SHOW_DATA:
+            fout = open(output_filename_prefix + '_' + str(h5_index) + '.txt', 'w')
+            for batch in range(h5_batch_data.shape[0]):
+                for p in range(h5_batch_data.shape[1]):
+                    fout.write('v %f %f %f \n' % (h5_batch_data[batch, p, 0], h5_batch_data[batch, p, 1],
+                                                  h5_batch_data[batch, p, 2]))
+            fout.close()
+        # --------------------------------------------------
         h5_index += 1
         buffer_size = 0
     return
