@@ -3,7 +3,7 @@ import math
 import h5py
 import numpy as np
 import tensorflow as tf
-
+import importlib
 import os
 import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,10 +14,16 @@ sys.path.append(os.path.join(ROOT_DIR, 'utils'))
 
 sys.path.append(os.path.join(ROOT_DIR, 'models'))
 data_folder = os.path.join(ROOT_DIR, 'data/IKG_hdf5')
-from models import pointnet_seg
+data_folder1 = os.path.join(ROOT_DIR, 'data/IKG_indoor3d_sem_seg_hdf5_data')
+
+#from models import pointnet_seg
+import model as pointnet_seg
 import provider
 import tf_util
 import time
+sys.path.append(os.path.join(ROOT_DIR, 'evaluate_city'))
+#Eval = importlib.import_module('iou')
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--gpu', type=int, default=0, help='GPU to use [default: GPU 0]')
 parser.add_argument('--log_dir', default='log', help='Log dir [default: log]')
@@ -66,12 +72,12 @@ Npoints = 6
 reader_shapes = {'data': [ NUM_POINT, Npoints],
                          'labels': [NUM_POINT]}
 reader_dtypes = {'data':tf.float32,'labels': tf.int32}
-def read_fn():
+def read_fn(data_folder_,ALL_FILES_):
     # We define a `read_fn` and iterate through the `file_references`, which
     # can contain information about the data to be read (e.g. a file path):
     # Load ALL data
-    for h5_filename in ALL_FILES:
-        data_batch, label_batch = provider.loadDataFile(os.path.join(data_folder, h5_filename))
+    for h5_filename in ALL_FILES_:
+        data_batch, label_batch = provider.loadDataFile(os.path.join(data_folder_, h5_filename))
         for i,label in enumerate(label_batch):
             yield {'data': data_batch[i,:,(6-Npoints):6], 'labels': label}
     return
@@ -101,13 +107,20 @@ def get_bn_decay(batch):
 
 def train():
     with tf.Graph().as_default():
-        dataset = tf.data.Dataset.from_generator(read_fn, reader_dtypes,reader_shapes)
+        dataset = tf.data.Dataset.from_generator(read_fn, reader_dtypes,reader_shapes,args = ([data_folder1,ALL_FILES]))
         dataset = dataset.repeat(None)
         dataset = dataset.shuffle(buffer_size=100)
         dataset = dataset.batch(BATCH_SIZE)
         dataset = dataset.prefetch(1)
         iterator = dataset.make_initializable_iterator()
         next_dict = iterator.get_next()
+
+        dataset_valid = tf.data.Dataset.from_generator(read_fn, reader_dtypes, reader_shapes,args = ([data_folder,ALL_FILES]))
+        dataset_valid = dataset_valid.repeat(None)
+        dataset_valid = dataset_valid.batch(BATCH_SIZE)
+        dataset_valid = dataset_valid.prefetch(1)
+        iterator_valid = dataset_valid.make_initializable_iterator()
+        next_dict_valid = iterator_valid.get_next()
         with tf.device('/gpu:'+str(GPU_INDEX)):
             pointclouds_pl, labels_pl = pointnet_seg.placeholder_inputs(BATCH_SIZE, NUM_POINT)
             #pointclouds_pl, labels_pl = next_dict['features'], next_dict['labels']
@@ -120,8 +133,11 @@ def train():
             tf.summary.scalar('bn_decay', bn_decay)
 
             # Get model and loss 
-            pred, end_points = pointnet_seg.get_model(pointclouds_pl, is_training_pl, bn_decay=bn_decay)
-            loss = pointnet_seg.get_loss(pred, labels_pl,end_points)
+            # pred, end_points = pointnet_seg.get_model(pointclouds_pl, is_training_pl, bn_decay=bn_decay)
+            # loss = pointnet_seg.get_loss(pred, labels_pl,end_points)
+            pred = pointnet_seg.get_model(pointclouds_pl, is_training_pl, bn_decay=bn_decay)
+            pred_softmax = tf.nn.softmax(pred)
+            loss = pointnet_seg.get_loss(pred, labels_pl)
             tf.summary.scalar('loss', loss)
 
             correct = tf.equal(tf.argmax(pred, 2), tf.to_int64(labels_pl))
@@ -155,6 +171,7 @@ def train():
 
         # Init variables
         sess.run(iterator.initializer)
+        sess.run(iterator_valid.initializer)
         init = tf.global_variables_initializer()
         sess.run(init, {is_training_pl:True})
 
@@ -166,14 +183,15 @@ def train():
                'loss': loss,
                'train_op': train_op,
                'merged': merged,
-               'step': batch}
+               'step': batch,
+               'pred_softmax':pred_softmax}
 
         for epoch in range(MAX_EPOCH):
             log_string('**** EPOCH %03d ****' % (epoch))
             sys.stdout.flush()
-             
+
             train_one_epoch(sess, ops, train_writer,next_dict)
-            #eval_one_epoch(sess, ops, test_writer)
+            eval_one_epoch(sess, ops, next_dict_valid)
             
             # Save the variables to disk.
             if (epoch+1) % 20 == 0:
@@ -188,7 +206,7 @@ def train_one_epoch(sess, ops, train_writer,next_dict):
     
     log_string('----')
     #current_data, current_label, _ = provider.shuffle_data(train_data[:,0:NUM_POINT,:], train_label)
-    current_data = sess.run(next_dict)
+    #sess.run(next_dict)
     #file_size = 363#len(room_filelist)
     file_size = np.loadtxt(os.path.join(data_folder,'room_filelist.txt'))
     print(file_size)
@@ -219,54 +237,42 @@ def train_one_epoch(sess, ops, train_writer,next_dict):
         total_correct += correct
         total_seen += (BATCH_SIZE*NUM_POINT)
         loss_sum += loss_val
-    
+        break
     log_string('mean loss: %f' % (loss_sum / float(num_batches)))
     log_string('accuracy: %f' % (total_correct / float(total_seen)))
 
         
-def eval_one_epoch(sess, ops, test_writer):
+def eval_one_epoch(sess, ops ,next_dict_valid):
     """ ops: dict mapping from string to tf ops """
     is_training = False
-    total_correct = 0
-    total_seen = 0
-    loss_sum = 0
-    total_seen_class = [0 for _ in range(NUM_CLASSES)]
-    total_correct_class = [0 for _ in range(NUM_CLASSES)]
-    
+    #sess.run(next_dict_valid)
     log_string('----')
-    current_data = test_data[:,0:NUM_POINT,:]
-    current_label = np.squeeze(test_label)
-    
-    file_size = current_data.shape[0]
-    num_batches = file_size // BATCH_SIZE
-    
+    label_pre_all = []
+    label_gt_all = []
+    file_size = np.loadtxt(os.path.join(data_folder, 'room_filelist.txt'))
+    print(file_size)
+    num_batches = int(file_size) // BATCH_SIZE
     for batch_idx in range(num_batches):
-        start_idx = batch_idx * BATCH_SIZE
-        end_idx = (batch_idx+1) * BATCH_SIZE
-        '''
-        feed_dict = {ops['pointclouds_pl']: current_data[start_idx:end_idx, :, :],
-                     ops['labels_pl']: current_label[start_idx:end_idx],
+        current_data, current_label = sess.run([next_dict_valid['data'], next_dict_valid['labels']])
+        feed_dict = {ops['pointclouds_pl']: current_data,
+                     ops['labels_pl']: current_label,
                      ops['is_training_pl']: is_training}
-         '''
-        feed_dict = {ops['is_training_pl']: is_training}
-        summary, step, loss_val, pred_val = sess.run([ops['merged'], ops['step'], ops['loss'], ops['pred']],
+
+        loss_val, pred_val = sess.run([ops['loss'], ops['pred_softmax']],
                                       feed_dict=feed_dict)
-        test_writer.add_summary(summary, step)
-        pred_val = np.argmax(pred_val, 2)
-        correct = np.sum(pred_val == current_label[start_idx:end_idx])
-        total_correct += correct
-        total_seen += (BATCH_SIZE*NUM_POINT)
-        loss_sum += (loss_val*BATCH_SIZE)
-        for i in range(start_idx, end_idx):
-            for j in range(NUM_POINT):
-                l = current_label[i, j]
-                total_seen_class[l] += 1
-                total_correct_class[l] += (pred_val[i-start_idx, j] == l)
-            
-    log_string('eval mean loss: %f' % (loss_sum / float(total_seen/NUM_POINT)))
-    log_string('eval accuracy: %f'% (total_correct / float(total_seen)))
-    log_string('eval avg class acc: %f' % (np.mean(np.array(total_correct_class)/np.array(total_seen_class,dtype=np.float))))
-         
+
+        pred_label = np.argmax(pred_val, 2)  # BxN
+        label_pre_all.append(pred_label)
+        label_gt_all.append(current_label)
+        break
+    label_pre_all = np.concatenate(label_pre_all, 0)
+    label_gt_all = np.concatenate(label_pre_all, 0)
+    pred = np.asarray(label_pre_all.reshape((1, -1, 1)), dtype=np.uint8)
+    gt = np.asarray((label_gt_all).reshape((1, -1, 1)), dtype=np.uint8)
+    #dict = Eval.get_iou(pred=np.asarray(label_pre_all.reshape((1, -1, 1)), dtype=np.uint8),
+    #                    gt=np.asarray((label_gt_all).reshape((1, -1, 1)), dtype=np.uint8))
+    #print('classScores: ',dict['classScores'])
+    #print('averageScoreClasses: ',dict['averageScoreClasses'])
 
 
 if __name__ == "__main__":
