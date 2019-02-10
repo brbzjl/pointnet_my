@@ -94,8 +94,8 @@ def combine_label_data(path_label, path_xyz, output_folder):
             data_label = data_label[idx]
             # z_road is the z mean value of the road
             road_idx = np.where(data_label[:, 3] == 0)
-            z_road = np.mean(data_label[road_idx, 2])
-            if z_road is None:
+            z_road = int(np.mean(data_label[road_idx, 2]))#############
+            if not isinstance(z_road,int):
                 z_road = 95
             # minmun value of xyz
             xy_min = np.amin(data_label, axis=0)[0:2]
