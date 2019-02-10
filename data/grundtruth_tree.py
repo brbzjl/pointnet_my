@@ -80,7 +80,7 @@ def combine_label_data(path_label, path_xyz, output_folder):
         label = np.load(labelfilename)
         label_majority = np.argmax(label, axis=-1)
         idxlabel = np.where(np.max(label, axis=-1) != 0)
-        #remove no all zero labels
+        #remove all zero labels
         label_majority = label_majority[idxlabel]
         #collect data from x y z files
         data_label = np.dstack((data_xyz[0][idxlabel], data_xyz[1][idxlabel], data_xyz[2][idxlabel]))
@@ -94,9 +94,9 @@ def combine_label_data(path_label, path_xyz, output_folder):
             idx = np.where(np.max(data_label[:, 0:3], axis=-1) != 0)
             data_label = data_label[idx]
             # z_road is the z mean value of the road
-            road_idx = np.where(label_majority == 0)
-            z_road = np.mean(data_label[road_idx, 2])
-            if z_road is None:
+            road_idx = np.where(data_label[:, 3] == 0)
+            z_road = int(np.mean(data_label[road_idx, 2]))#############
+            if not isinstance(z_road,int):
                 z_road = 95
             # minmun value of xyz
             xy_min = np.amin(data_label, axis=0)[0:2]
